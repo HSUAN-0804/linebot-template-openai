@@ -41,7 +41,7 @@ def call_openai_chat_api(user_message):
     openai.api_key = os.getenv('OPENAI_API_KEY', None)
 
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": user_message},
