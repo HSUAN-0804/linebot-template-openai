@@ -1,60 +1,41 @@
 import os
-import sys
 import openai
 import aiohttp
-from fastapi import FastAPI, Request, HTTPException
-from linebot.v3.webhook import WebhookParser
-from linebot.v3.messaging import (
-    AsyncLineBotApi,
-    TextMessage,
-    ImageMessage,
-    TextSendMessage
-)
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.models import MessageEvent
+from fastapi import FastAPI, Request
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 from dotenv import load_dotenv, find_dotenv
+import base64
 
 load_dotenv(find_dotenv())
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-if channel_secret is None or channel_access_token is None:
-    print("請設定 LINE_CHANNEL_SECRET 和 LINE_CHANNEL_ACCESS_TOKEN")
-    sys.exit(1)
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
 app = FastAPI()
-session = aiohttp.ClientSession()
-parser = WebhookParser(channel_secret)
-line_bot_api = AsyncLineBotApi(channel_access_token=channel_access_token, async_http_client=session)
 
-async def call_openai_chat_api(user_message):
+async def call_openai_chat(user_message):
     response = await openai.ChatCompletion.acreate(
         model="gpt-4o",
         messages=[
-            {
-                "role": "system",
-                "content": "你是 H.R燈藝的智慧客服，語氣活潑親切又專業，店家地址在桃園中壢，營業時間為早上10:30～21:00，週四固定公休，週日18:00提早關門，請協助客戶解決所有問題。"
-            },
+            {"role": "system", "content": "你是 H.R燈藝的智慧客服，語氣活潑親切又專業。店家在桃園中壢，營業時間為10:30～21:00，週四公休，週日提早到18:00。"},
             {"role": "user", "content": user_message}
         ]
     )
     return response.choices[0].message.content
 
-async def call_openai_vision(image_url):
+async def call_openai_vision(base64_image):
     response = await openai.ChatCompletion.acreate(
         model="gpt-4o",
         messages=[
-            {
-                "role": "system",
-                "content": "你是 H.R燈藝的智慧客服，語氣活潑親切又專業，請協助客戶分析圖片內容並提供建議。"
-            },
+            {"role": "system", "content": "你是 H.R燈藝的智慧客服，請分析這張圖片的內容並提供幫助，語氣活潑親切。"},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "請幫我看看這張圖片是什麼"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
+                    {"type": "text", "text": "請幫我看看這是什麼圖片"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                 ]
             }
         ]
@@ -65,29 +46,22 @@ async def call_openai_vision(image_url):
 async def callback(request: Request):
     signature = request.headers["X-Line-Signature"]
     body = await request.body()
-    body = body.decode()
-
     try:
-        events = parser.parse(body, signature)
+        handler.handle(body.decode(), signature)
     except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-
-    for event in events:
-        if isinstance(event, MessageEvent):
-            msg = event.message
-            token = event.reply_token
-
-            if isinstance(msg, TextMessage):
-                reply = await call_openai_chat_api(msg.text)
-                await line_bot_api.reply_message(token, [TextSendMessage(text=reply)])
-
-            elif isinstance(msg, ImageMessage):
-                content = await line_bot_api.get_message_content(msg.id)
-                image_data = await content.read()
-                import base64
-                base64_image = base64.b64encode(image_data).decode()
-                data_url = f"data:image/jpeg;base64,{base64_image}"
-                reply = await call_openai_vision(data_url)
-                await line_bot_api.reply_message(token, [TextSendMessage(text=reply)])
-
+        return "Invalid signature"
     return "OK"
+
+@handler.add(MessageEvent)
+def handle_message(event):
+    from linebot.models import ImageSendMessage
+    if isinstance(event.message, TextMessage):
+        reply_text = aiohttp.run(call_openai_chat(event.message.text))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
+    elif isinstance(event.message, ImageMessage):
+        message_content = line_bot_api.get_message_content(event.message.id)
+        image_bytes = b''.join(chunk for chunk in message_content.iter_content())
+        base64_image = base64.b64encode(image_bytes).decode()
+        reply_text = aiohttp.run(call_openai_vision(base64_image))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
