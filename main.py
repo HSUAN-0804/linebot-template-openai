@@ -1,98 +1,67 @@
 # -*- coding: utf-8 -*-
-
-#  Licensed under the Apache License, Version 2.0 (the "License"); you may
-#  not use this file except in compliance with the License. You may obtain
-#  a copy of the License at
-#
-#       https://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-#  License for the specific language governing permissions and limitations
-#  under the License.
-
-import openai
 import os
-import sys
 import json
-
-import aiohttp
-
-from fastapi import Request, FastAPI, HTTPException
+import openai
+from fastapi import FastAPI, Request, HTTPException
+from dotenv import load_dotenv, find_dotenv
 from linebot import (
     AsyncLineBotApi, WebhookParser
 )
-from linebot.aiohttp_async_http_client import AiohttpAsyncHttpClient
-from linebot.exceptions import (
-    InvalidSignatureError
-)
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
+    MessageEvent, TextMessage, TextSendMessage
 )
+from linebot.exceptions import InvalidSignatureError
+import aiohttp
 
-from dotenv import load_dotenv, find_dotenv
-_ = load_dotenv(find_dotenv())  # read local .env file
+load_dotenv(find_dotenv())
 
-
-# Initialize OpenAI API
-
-def call_openai_chat_api(user_message):
-    openai.api_key = os.getenv('OPENAI_API_KEY', None)
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": user_message},
-        ]
-    )
-
-    return response.choices[0].message['content']
-
-
-# Get channel_secret and channel_access_token from your environment variable
-channel_secret = os.getenv('ChannelSecret', None)
-channel_access_token = os.getenv('ChannelAccessToken', None)
-if channel_secret is None:
-    print('Specify LINE_CHANNEL_SECRET as environment variable.')
-    sys.exit(1)
-if channel_access_token is None:
-    print('Specify LINE_CHANNEL_ACCESS_TOKEN as environment variable.')
-    sys.exit(1)
-
-# Initialize LINE Bot Messaigng API
+# 初始化
 app = FastAPI()
 session = aiohttp.ClientSession()
-async_http_client = AiohttpAsyncHttpClient(session)
-line_bot_api = AsyncLineBotApi(channel_access_token, async_http_client)
-parser = WebhookParser(channel_secret)
-
+line_bot_api = AsyncLineBotApi(channel_access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+parser = WebhookParser(channel_secret=os.getenv("LINE_CHANNEL_SECRET"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 @app.post("/callback")
-async def handle_callback(request: Request):
-    signature = request.headers['X-Line-Signature']
-
-    # get request body as text
+async def callback(request: Request):
+    signature = request.headers["X-Line-Signature"]
     body = await request.body()
     body = body.decode()
-
     try:
         events = parser.parse(body, signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
-
+    
     for event in events:
         if not isinstance(event, MessageEvent):
             continue
         if not isinstance(event.message, TextMessage):
             continue
-
-        result = call_openai_chat_api(event.message.text)
-
+        user_message = event.message.text
+        reply = await chatgpt_reply(user_message)
         await line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=result)
+            TextSendMessage(text=reply)
         )
+    return "OK"
 
-    return 'OK'
+async def chatgpt_reply(user_message):
+    response = await openai.ChatCompletion.acreate(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是一位語氣活潑親切又專業的女生，是 H.R燈藝 的 LINE 客服助理。"
+                    "請使用繁體中文回覆，不要使用 emoji。"
+                    "品牌資訊：H.R燈藝，地址：桃園市中壢區南園二路435號，營業時間為 10:30～21:00，週四公休，週日18:00提早打烊。"
+                    "請根據客戶提問，自然融入這些資訊並提供親切清楚的回答。"
+                )
+            },
+            {
+                "role": "user",
+                "content": user_message
+            }
+        ]
+    )
+    return response.choices[0].message.content
