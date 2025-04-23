@@ -1,91 +1,73 @@
 import os
 import openai
-from fastapi import FastAPI, Request, HTTPException
-from linebot.v3 import WebhookParser
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
-from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, TextMessage
-)
-from linebot.v3.messaging.models import MessageAction
 import httpx
-import base64
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError
 
-# 初始化 LINE 與 OpenAI 設定
-openai.api_key = os.getenv("OPENAI_API_KEY")
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-configuration = Configuration(access_token=channel_access_token)
 app = FastAPI()
-parser = WebhookParser(channel_secret)
 
-# 系統提示語
-SYSTEM_PROMPT = """
-你是 H.R燈藝 的智慧客服，一位活潑親切又專業的女生，請用繁體中文回答客戶問題。
-我們專門販售與改裝機車燈具，地址：桃園市中壢區南園二路435號，
-營業時間為每天 10:30～21:00，週四固定公休，週日18:00關門。
-請根據客戶的提問，自然地回覆。
-"""
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# 呼叫 GPT-4o，支援圖文理解
-async def call_openai_chat(messages):
-    response = await openai.ChatCompletion.acreate(
-        model="gpt-4o",
-        messages=messages
-    )
-    return response.choices[0].message.content.strip()
-
-# 圖片下載並轉為 base64 (送給 GPT-4o 使用)
-async def fetch_image_as_base64(api: MessagingApi, message_id: str) -> str:
-    stream = await api.get_message_content(message_id)
-    image_bytes = b"".join([chunk async for chunk in stream.iter_bytes()])
-    encoded = base64.b64encode(image_bytes).decode('utf-8')
-    return f"data:image/jpeg;base64,{encoded}"
-
-# LINE Webhook 接收端點
 @app.post("/callback")
 async def callback(request: Request):
-    signature = request.headers.get("x-line-signature", "")
+    signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        events = parser.parse(body.decode("utf-8"), signature)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid signature")
+        handler.handle(body.decode(), signature)
+    except InvalidSignatureError:
+        return JSONResponse(status_code=400, content={"message": "Invalid signature"})
+    return JSONResponse(status_code=200, content={"message": "OK"})
 
-    async with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    user_message = event.message.text
+    reply_text = call_openai_chat(user_message)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
-        for event in events:
-            if isinstance(event, MessageEvent):
-                reply_token = event.reply_token
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_id = event.message.id
+    message_content = line_bot_api.get_message_content(message_id)
+    image_bytes = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
 
-                # 使用者訊息內容
-                if isinstance(event.message, TextMessageContent):
-                    user_input = event.message.text
-                elif isinstance(event.message, ImageMessageContent):
-                    image_base64 = await fetch_image_as_base64(line_bot_api, event.message.id)
-                    user_input = f"請幫我看這張圖片：{image_base64}"
-                else:
-                    user_input = "收到非文字/圖片訊息，請傳文字或圖片給我喔！"
+    import base64
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
-                # 組合對話訊息
-                messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_input}
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "你是H.R燈藝的親切專業客服小姐姐，根據圖片內容協助解說或提供建議。"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "請幫我看這張圖片的內容"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
                 ]
+            }
+        ]
+    )
+    answer = response.choices[0].message.content
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer))
 
-                try:
-                    reply_text = await call_openai_chat(messages)
-                except Exception as e:
-                    reply_text = f"發生錯誤：{str(e)}"
-
-                # 回傳給使用者
-                await line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=reply_token,
-                        messages=[TextMessage(text=reply_text)]
-                    )
+def call_openai_chat(user_message: str) -> str:
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是H.R燈藝的客服小姐姐，風格親切活潑又專業，提供店家資訊如下：\\n"
+                    "店名：H.R燈藝\\n"
+                    "地址：桃園市中壢區\\n"
+                    "營業時間：10:30～21:00，週四公休，週日18:00提早打烊"
                 )
-
-    return "OK"
+            },
+            {"role": "user", "content": user_message}
+        ]
+    )
+    return response.choices[0].message.content
