@@ -1,32 +1,30 @@
 import os
 import base64
+import openai
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-from openai import OpenAI
+from linebot.models import (
+    MessageEvent, TextMessage, ImageMessage, TextSendMessage
+)
 
-# === 環境變數 ===
+# 環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# === LINE 設定 ===
+# 初始化 LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# === FastAPI App ===
+# 初始化 FastAPI
 app = FastAPI()
 
-# === OpenAI 客戶端 ===
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# === 客服系統提示 ===
+# 客服語氣 Prompt（繁體、專業親切、不提 AI、不用簡體字）
 SYSTEM_PROMPT = """
-你是「H.R燈藝」的客服小姐姐，專門幫客人解答與機車燈具、安裝教學、改裝精品有關的問題。
-語氣要活潑親切又專業，回覆文字請使用「繁體中文」，不要使用簡體字、emoji，也不要提到你是 AI。
+你是「H.R燈藝」的客服小姐姐，專門幫客人解答與機車燈具、安裝教學、改裝精品有關的問題。語氣要活潑親切又專業，回覆文字請使用「繁體中文」，不要使用簡體字、emoji，也不要提到你是 AI。
 
 店家資訊如下：
 店名：H.R燈藝 機車精品改裝
@@ -35,10 +33,10 @@ SYSTEM_PROMPT = """
 連絡電話：03 433 3088
 """
 
-# === Webhook ===
+# Webhook Endpoint
 @app.post("/callback")
 async def callback(request: Request):
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
         handler.handle(body.decode("utf-8"), signature)
@@ -46,20 +44,37 @@ async def callback(request: Request):
         return PlainTextResponse("Invalid signature", status_code=400)
     return PlainTextResponse("OK", status_code=200)
 
-# === GPT：處理文字 ===
-def call_openai_chat(user_input: str) -> str:
+# 處理文字訊息
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    user_text = event.message.text
+    reply = call_openai_chat(user_text)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+# 處理圖片訊息
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
+    image_bytes = b"".join(chunk for chunk in message_content.iter_content())
+    reply = call_openai_vision(image_bytes)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+# 呼叫 GPT-4o 處理文字
+def call_openai_chat(user_text: str) -> str:
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_input}
+            {"role": "user", "content": user_text}
         ]
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
 
-# === GPT：處理圖片 ===
-def call_openai_image(image_bytes: bytes) -> str:
+# 呼叫 GPT-4o 處理圖片
+def call_openai_vision(image_bytes: bytes) -> str:
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -73,18 +88,4 @@ def call_openai_image(image_bytes: bytes) -> str:
             }
         ]
     )
-    return response.choices[0].message.content
-
-# === 處理文字訊息 ===
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    reply = call_openai_chat(event.message.text)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-# === 處理圖片訊息 ===
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-    image_data = b''.join(chunk for chunk in message_content.iter_content())
-    reply = call_openai_image(image_data)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    return response.choices[0].message.content.strip()
