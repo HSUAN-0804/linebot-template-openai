@@ -1,49 +1,62 @@
-import openai
 import os
 import sys
-import json
+import openai
 import aiohttp
-from fastapi import FastAPI, Request
-from linebot import (
-    AsyncLineBotApi, WebhookParser
+from fastapi import FastAPI, Request, HTTPException
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.messaging import (
+    AsyncLineBotApi,
+    TextMessage,
+    ImageMessage,
+    TextSendMessage
 )
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage
-)
-from linebot.exceptions import (
-    InvalidSignatureError
-)
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.models import MessageEvent
 from dotenv import load_dotenv, find_dotenv
 
-_ = load_dotenv(find_dotenv())
+load_dotenv(find_dotenv())
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 channel_secret = os.getenv("LINE_CHANNEL_SECRET")
 channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
-if channel_secret is None:
-    print("請設定 LINE_CHANNEL_SECRET")
-    sys.exit(1)
-if channel_access_token is None:
-    print("請設定 LINE_CHANNEL_ACCESS_TOKEN")
+if channel_secret is None or channel_access_token is None:
+    print("請設定 LINE_CHANNEL_SECRET 和 LINE_CHANNEL_ACCESS_TOKEN")
     sys.exit(1)
 
 app = FastAPI()
 session = aiohttp.ClientSession()
-line_bot_api = AsyncLineBotApi(channel_access_token, async_http_client=session)
 parser = WebhookParser(channel_secret)
+line_bot_api = AsyncLineBotApi(channel_access_token=channel_access_token, async_http_client=session)
 
-# 回應函式：繁體中文、GPT-4o、活潑親切專業語氣
-def call_openai_chat_api(user_message):
-    response = openai.ChatCompletion.create(
+async def call_openai_chat_api(user_message):
+    response = await openai.ChatCompletion.acreate(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": (
-                "你是 H.R燈藝的客服小姊姊，說話活潑親切又專業，請用繁體中文回答用戶問題。"
-                "H.R燈藝是一間位在桃園中壢的機車燈具專賣與改裝店，營業時間為每天早上10:30到晚上9:00，"
-                "週四固定公休，週日18:00提早打烊，若有客戶詢問相關資訊，請主動告知。"
-            )},
+            {
+                "role": "system",
+                "content": "你是 H.R燈藝的智慧客服，語氣活潑親切又專業，店家地址在桃園中壢，營業時間為早上10:30～21:00，週四固定公休，週日18:00提早關門，請協助客戶解決所有問題。"
+            },
             {"role": "user", "content": user_message}
+        ]
+    )
+    return response.choices[0].message.content
+
+async def call_openai_vision(image_url):
+    response = await openai.ChatCompletion.acreate(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "你是 H.R燈藝的智慧客服，語氣活潑親切又專業，請協助客戶分析圖片內容並提供建議。"
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "請幫我看看這張圖片是什麼"},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            }
         ]
     )
     return response.choices[0].message.content
@@ -57,19 +70,24 @@ async def callback(request: Request):
     try:
         events = parser.parse(body, signature)
     except InvalidSignatureError:
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse("Invalid signature", status_code=400)
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     for event in events:
-        if not isinstance(event, MessageEvent) or not isinstance(event.message, TextMessage):
-            continue
+        if isinstance(event, MessageEvent):
+            msg = event.message
+            token = event.reply_token
 
-        user_message = event.message.text
-        reply = call_openai_chat_api(user_message)
+            if isinstance(msg, TextMessage):
+                reply = await call_openai_chat_api(msg.text)
+                await line_bot_api.reply_message(token, [TextSendMessage(text=reply)])
 
-        await line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply)
-        )
+            elif isinstance(msg, ImageMessage):
+                content = await line_bot_api.get_message_content(msg.id)
+                image_data = await content.read()
+                import base64
+                base64_image = base64.b64encode(image_data).decode()
+                data_url = f"data:image/jpeg;base64,{base64_image}"
+                reply = await call_openai_vision(data_url)
+                await line_bot_api.reply_message(token, [TextSendMessage(text=reply)])
 
     return "OK"
