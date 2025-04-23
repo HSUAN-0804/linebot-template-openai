@@ -1,5 +1,4 @@
-line-bot-sdk==2.4.1
+line-bot-sdk==3.5.0
 fastapi
 uvicorn[standard]
-openai==1.16.1
-httpx
+openai>=1.0.0
