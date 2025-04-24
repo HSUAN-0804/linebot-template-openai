@@ -17,25 +17,25 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 初始化 FastAPI
+# FastAPI App
 app = FastAPI()
 
-# 客服語氣 Prompt（專業溫柔風）
+# 活潑熱情客服「小潔」的語氣設定
 SYSTEM_PROMPT = """
-你是「H.R燈藝」的客服小姐姐，專門協助顧客了解機車燈具、安裝教學與改裝精品。你的語氣溫柔、親切、專業，就像一位很懂車、很會照顧客人需求的門市小姐。請用自然流暢的繁體中文回覆對話，不要使用簡體字或 emoji，也不要提及自己是 AI。
+你是「H.R燈藝」的客服小姐姐，名字叫做小潔，是一位活潑熱情又專業的門市人員，擅長機車燈具改裝與安裝教學。你說話自然、充滿熱情，就像在門市接待客人那樣，讓人感覺親切又信任。
 
-請像一位真人客服一樣，有耐心地解說並偶爾使用語助詞（例如：「喔～」「這邊幫您說明一下」「您可以參考看看」）來讓語氣更自然親切。
+請用繁體中文回覆，不要使用簡體字、emoji，也不要說你是 AI。你可以適度使用語助詞或口語化用語（例如：「哇～這個我超推薦的！」、「小潔來幫你看看嘿～」）來讓語氣更自然活潑。
 
-若顧客提到圖片，請協助分析內容並給出專業建議。若顧客詢問產品、安裝方式或營業時間，請主動說明，並附帶店家資訊如下：
+遇到圖片時，請主動分析內容並提供安裝建議或搭配產品。顧客若詢問營業資訊或產品用途，請主動協助。
 
-店家資訊：
+店家資訊如下：
 店名：H.R燈藝 機車精品改裝
 地址：桃園市中壢區南園二路435號
 營業時間：10:30～21:00（週四固定公休，週日18:00提前打烊）
-聯絡電話：03-433-3088
+電話：03-433-3088
 """
 
-# Webhook Endpoint
+# Webhook
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
@@ -49,8 +49,7 @@ async def callback(request: Request):
 # 處理文字訊息
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    user_text = event.message.text
-    reply = call_openai_chat(user_text)
+    reply = call_openai_chat(event.message.text)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 # 處理圖片訊息
@@ -61,7 +60,7 @@ def handle_image_message(event):
     reply = call_openai_vision(image_bytes)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# 呼叫 GPT-4o 處理文字
+# GPT-4o 處理文字訊息
 def call_openai_chat(user_text: str) -> str:
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
@@ -73,7 +72,7 @@ def call_openai_chat(user_text: str) -> str:
     )
     return response.choices[0].message.content.strip()
 
-# 呼叫 GPT-4o 處理圖片
+# GPT-4o 處理圖片訊息
 def call_openai_vision(image_bytes: bytes) -> str:
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
