@@ -3,47 +3,39 @@ import base64
 import json
 import datetime
 import httpx
-import openai
 import gspread
+import openai
+from openai import OpenAI
 from oauth2client.service_account import ServiceAccountCredentials
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, ImageMessage,
-    TextSendMessage
-)
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 
-# === 環境變數 ===
+# 環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
 
-# === LINE 設定 ===
+# LINE 設定
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# === FastAPI App ===
+# FastAPI 應用
 app = FastAPI()
 
-# === 每日問候紀錄 ===
+# 每日問候紀錄
 greeted_users = {}
 
-# === 小婕的語氣設定 ===
+# 小婕的人設 prompt
 SYSTEM_PROMPT = """
 你是來自「H.R燈藝」的客服女孩「小婕」，個性活潑熱情又專業，專門回答與機車燈具、安裝方式、改裝精品有關的問題。
-請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，不使用簡體字，不使用 emoji，不需要重複店家資訊。
-
-如果客人詢問商品，請在提供價格或資訊後，補上一句：
-「有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！」
-
-若詢問的商品名稱在 Google Sheet 中是明確唯一的，就直接回覆完整資料；
-若是有多種版本，請提醒客人目前有多種選擇，並簡短列出差異。
+請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，請勿使用簡體字與 emoji。
 """
 
-# === Google Sheet 查詢 ===
+# 讀取 Google Sheet 並模糊搜尋
 def search_google_sheet(user_input: str) -> str:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
@@ -51,54 +43,49 @@ def search_google_sheet(user_input: str) -> str:
     client = gspread.authorize(creds)
     sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/16_oMf8gcXNU1-RLyztSDpAm6Po0xMHm4VVVUpMAhORs")
     
-    matched = []
+    all_results = []
     for worksheet in sheet.worksheets():
-        rows = worksheet.get_all_records()
-        for row in rows:
-            if any(user_input in str(v) for v in row.values()):
-                matched.append(row)
+        records = worksheet.get_all_records()
+        for row in records:
+            row_text = json.dumps(row, ensure_ascii=False)
+            if any(keyword in row_text for keyword in user_input.split()):
+                result = "｜".join(f"{k}：{v}" for k, v in row.items() if v)
+                all_results.append(result)
 
-    if len(matched) == 1:
-        row = matched[0]
-        reply = "這邊是您查詢的商品資訊：\n" + "\n".join(f"{k}：{v}" for k, v in row.items())
-        reply += "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
-        return reply
-    elif len(matched) > 1:
-        info_list = []
-        for row in matched[:3]:
-            info = "｜".join(f"{k}：{v}" for k, v in row.items())
-            info_list.append(info)
-        reply = f"我有找到幾種版本的商品，您可以參考看看：\n" + "\n\n".join(info_list)
-        reply += "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
-        return reply
+    if all_results:
+        extra = "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
+        return "以下是我從資料庫幫您找到的商品資訊：\n" + "\n\n".join(all_results) + extra
     else:
         return ""
 
-# === OpenAI Chat 回覆 ===
+# 呼叫 GPT 回覆文字
 def call_openai_chat(user_input: str, image_context: str = None) -> str:
-    openai.api_key = OPENAI_API_KEY
-    context = search_google_sheet(user_input)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    client = OpenAI(api_key=OPENAI_API_KEY)
     today = str(datetime.date.today())
     if greeted_users.get(today) is None:
         greeted_users.clear()
         greeted_users[today] = set()
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if user_input not in greeted_users[today]:
-        messages.append({"role": "assistant", "content": "哈囉～這裡是 H.R燈藝，我是小婕！有任何燈具或改裝問題都可以問我唷！"})
+        messages.append({"role": "assistant", "content": "您好～這裡是 H.R燈藝，我是小婕！很高興為您服務！"})
         greeted_users[today].add(user_input)
+
+    context = search_google_sheet(user_input)
     if context:
-        messages.append({"role": "system", "content": f"以下是知識庫資料：\n{context}"})
+        messages.append({"role": "system", "content": f"以下是查詢結果：\n{context}"})
     if image_context:
         messages.append({"role": "user", "content": f"這是圖片內容分析：{image_context}"})
     messages.append({"role": "user", "content": user_input})
-    response = openai.ChatCompletion.create(model="gpt-4o", messages=messages)
-    return response.choices[0].message["content"]
 
-# === 處理圖片內容 ===
+    response = client.chat.completions.create(model="gpt-4o", messages=messages)
+    return response.choices[0].message.content.strip()
+
+# 圖片辨識
 def call_openai_image(image_bytes: bytes) -> str:
-    openai.api_key = OPENAI_API_KEY
+    client = OpenAI(api_key=OPENAI_API_KEY)
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -111,9 +98,12 @@ def call_openai_image(image_bytes: bytes) -> str:
             }
         ]
     )
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content.strip()
 
-# === 接收 LINE Webhook ===
+# 快取圖片用戶資訊
+message_cache = {}
+
+# LINE webhook 接收
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers["X-Line-Signature"]
@@ -124,12 +114,9 @@ async def callback(request: Request):
         return PlainTextResponse("Invalid signature", status_code=400)
     return PlainTextResponse("OK", status_code=200)
 
-# === 圖片+文字快取整合 ===
-message_cache = {}
-
-# === 處理文字訊息 ===
+# 處理文字訊息
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
+def handle_text(event):
     user_id = event.source.user_id
     user_input = event.message.text
     if user_id in message_cache:
@@ -139,9 +126,9 @@ def handle_text_message(event):
         reply = call_openai_chat(user_input)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# === 處理圖片訊息 ===
+# 處理圖片訊息
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
+def handle_image(event):
     message_content = line_bot_api.get_message_content(event.message.id)
     image_data = b''.join(chunk for chunk in message_content.iter_content())
     image_context = call_openai_image(image_data)
