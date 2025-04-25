@@ -45,7 +45,7 @@ greeted_users = {}
 # === 使用者上下文記憶
 user_context_memory = {}
 
-# === 查詢 Google Sheet（模糊比對）
+# === 查詢 Google Sheet（強化模糊比對＋明確回覆）
 def search_google_sheet(user_input: str) -> str:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
@@ -68,6 +68,7 @@ def search_google_sheet(user_input: str) -> str:
                 all_results.append(info)
 
     if all_results:
+        # 改成直接回覆，不再模糊推託
         return "以下是我從知識庫找到的資料：\n" + "\n\n".join(all_results)
     else:
         return ""
@@ -91,7 +92,7 @@ def call_openai_chat(user_id: str, user_input: str, image_context: str = None) -
     if memory:
         messages.append({"role": "system", "content": f"這是客人前面的描述：{memory}"})
     if context:
-        messages.append({"role": "system", "content": f"這是知識庫內容：{context}"})
+        messages.append({"role": "system", "content": f"這是知識庫找到的商品資訊：\n{context}"})
     if image_context:
         messages.append({"role": "user", "content": f"這是圖片分析結果：{image_context}"})
 
