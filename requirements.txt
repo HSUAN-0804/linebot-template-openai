@@ -1,8 +1,7 @@
 fastapi
-line-bot-sdk
 uvicorn
+line-bot-sdk
 openai>=1.0.0
-httpx
-python-dotenv
 gspread
 oauth2client
+httpx
