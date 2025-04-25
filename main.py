@@ -31,19 +31,19 @@ app = FastAPI()
 # === 每日問候紀錄 ===
 greeted_users = {}
 
-# === 小婕客服系統設定 ===
+# === 小婕的語氣設定 ===
 SYSTEM_PROMPT = """
 你是來自「H.R燈藝」的客服女孩「小婕」，個性活潑熱情又專業，專門回答與機車燈具、安裝方式、改裝精品有關的問題。
-請使用繁體中文回答，語氣要自然親切，像真人客服一樣，請勿使用簡體字與 emoji。
-若客人詢問商品價格，請簡潔明確回覆；若找到多筆商品，請建議客人提供「更明確的車種或關鍵字」。
-店家資訊如下（平常不用主動提及，只有客人詢問時再回答）：
-店名：H.R燈藝 機車精品改裝
-地址：桃園市中壢區南園二路435號
-營業時間：10:30～21:00（週四公休，週日18:00提早打烊）
-連絡電話：03 433 3088
+請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，不使用簡體字，不使用 emoji，不需要重複店家資訊。
+
+如果客人詢問商品，請在提供價格或資訊後，補上一句：
+「有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！」
+
+若詢問的商品名稱在 Google Sheet 中是明確唯一的，就直接回覆完整資料；
+若是有多種版本，請提醒客人目前有多種選擇，並簡短列出差異。
 """
 
-# === 查詢 Google Sheet ===
+# === Google Sheet 查詢 ===
 def search_google_sheet(user_input: str) -> str:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
@@ -51,28 +51,30 @@ def search_google_sheet(user_input: str) -> str:
     client = gspread.authorize(creds)
     sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/16_oMf8gcXNU1-RLyztSDpAm6Po0xMHm4VVVUpMAhORs")
     
-    all_results = []
-    matched_product = None
-
+    matched = []
     for worksheet in sheet.worksheets():
-        records = worksheet.get_all_records()
-        for row in records:
-            for value in row.values():
-                if user_input.lower() in str(value).lower():
-                    all_results.append(row)
-                    matched_product = row
+        rows = worksheet.get_all_records()
+        for row in rows:
+            if any(user_input in str(v) for v in row.values()):
+                matched.append(row)
 
-    if len(all_results) == 1:
-        reply = "這款商品的資訊如下：\n"
-        reply += "｜".join(f"{k}：{v}" for k, v in matched_product.items())
-        reply += "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！\n也歡迎多多善用我們的預約系統，自行挑選時段預約唷！"
+    if len(matched) == 1:
+        row = matched[0]
+        reply = "這邊是您查詢的商品資訊：\n" + "\n".join(f"{k}：{v}" for k, v in row.items())
+        reply += "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
         return reply
-    elif len(all_results) > 1:
-        return "我找到幾筆可能相關的資料～您可以再提供更明確的車種或關鍵字讓我幫您精準查詢唷！"
+    elif len(matched) > 1:
+        info_list = []
+        for row in matched[:3]:
+            info = "｜".join(f"{k}：{v}" for k, v in row.items())
+            info_list.append(info)
+        reply = f"我有找到幾種版本的商品，您可以參考看看：\n" + "\n\n".join(info_list)
+        reply += "\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
+        return reply
     else:
         return ""
 
-# === 呼叫 OpenAI Chat ===
+# === OpenAI Chat 回覆 ===
 def call_openai_chat(user_input: str, image_context: str = None) -> str:
     openai.api_key = OPENAI_API_KEY
     context = search_google_sheet(user_input)
@@ -82,17 +84,17 @@ def call_openai_chat(user_input: str, image_context: str = None) -> str:
         greeted_users.clear()
         greeted_users[today] = set()
     if user_input not in greeted_users[today]:
-        messages.append({"role": "assistant", "content": "哈囉～這裡是 H.R燈藝，我是小婕！有什麼燈具改裝的問題都可以問我唷！"})
+        messages.append({"role": "assistant", "content": "哈囉～這裡是 H.R燈藝，我是小婕！有任何燈具或改裝問題都可以問我唷！"})
         greeted_users[today].add(user_input)
     if context:
-        messages.append({"role": "system", "content": f"以下是知識庫內容：\n{context}"})
+        messages.append({"role": "system", "content": f"以下是知識庫資料：\n{context}"})
     if image_context:
         messages.append({"role": "user", "content": f"這是圖片內容分析：{image_context}"})
     messages.append({"role": "user", "content": user_input})
     response = openai.ChatCompletion.create(model="gpt-4o", messages=messages)
     return response.choices[0].message["content"]
 
-# === 呼叫 OpenAI 處理圖片 ===
+# === 處理圖片內容 ===
 def call_openai_image(image_bytes: bytes) -> str:
     openai.api_key = OPENAI_API_KEY
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
@@ -111,7 +113,7 @@ def call_openai_image(image_bytes: bytes) -> str:
     )
     return response.choices[0].message["content"]
 
-# === Webhook 接收處理 ===
+# === 接收 LINE Webhook ===
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers["X-Line-Signature"]
@@ -122,7 +124,7 @@ async def callback(request: Request):
         return PlainTextResponse("Invalid signature", status_code=400)
     return PlainTextResponse("OK", status_code=200)
 
-# === 訊息緩衝區（整合圖片＋文字）===
+# === 圖片+文字快取整合 ===
 message_cache = {}
 
 # === 處理文字訊息 ===
