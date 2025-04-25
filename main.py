@@ -2,6 +2,7 @@ import os
 import base64
 import json
 import datetime
+import difflib
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
@@ -30,6 +31,7 @@ app = FastAPI()
 SYSTEM_PROMPT = """
 你是來自「H.R燈藝」的客服女孩「小婕」，個性活潑熱情又專業，專門回答與機車燈具、安裝方式、改裝精品有關的問題。
 請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，請勿使用簡體字與 emoji。
+回答內容請簡潔扼要，避免過度冗長，直接切入重點。
 店家資訊如下：
 店名：H.R燈藝 機車精品改裝
 地址：桃園市中壢區南園二路435號
@@ -40,10 +42,10 @@ SYSTEM_PROMPT = """
 # === 問候紀錄（每天一次）
 greeted_users = {}
 
-# === 使用者對話暫存（上下文記憶）
+# === 使用者上下文記憶
 user_context_memory = {}
 
-# === 查詢 Google Sheet（模糊搜尋）
+# === 查詢 Google Sheet（模糊比對）
 def search_google_sheet(user_input: str) -> str:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
@@ -55,11 +57,15 @@ def search_google_sheet(user_input: str) -> str:
     for worksheet in sheet.worksheets():
         records = worksheet.get_all_records()
         for row in records:
+            match_score = 0
             for value in row.values():
-                if value and str(user_input).lower() in str(value).lower():
-                    info = "｜".join(f"{k}：{v}" for k, v in row.items())
-                    all_results.append(info)
-                    break  # 一行只要符合一次就可以了
+                if value:
+                    ratio = difflib.SequenceMatcher(None, str(user_input).lower(), str(value).lower()).ratio()
+                    if ratio > match_score:
+                        match_score = ratio
+            if match_score > 0.6:  # 比對相似度超過60%就認為相關
+                info = "｜".join(f"{k}：{v}" for k, v in row.items())
+                all_results.append(info)
 
     if all_results:
         return "以下是我從知識庫找到的資料：\n" + "\n\n".join(all_results)
