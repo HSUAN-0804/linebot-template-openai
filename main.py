@@ -2,10 +2,6 @@ import os
 import base64
 import json
 import datetime
-import httpx
-import openai
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
@@ -14,6 +10,9 @@ from linebot.models import (
     MessageEvent, TextMessage, ImageMessage,
     TextSendMessage
 )
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from openai import OpenAI
 
 # === 環境變數 ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -21,11 +20,10 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
 
-# === LINE 設定 ===
+# === 初始化 ===
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# === FastAPI App ===
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 
 # === 每日問候紀錄 ===
@@ -64,9 +62,8 @@ def search_google_sheet(user_input: str) -> str:
     else:
         return ""
 
-# === 呼叫 OpenAI Chat ===
+# === 呼叫 OpenAI Chat（新版）===
 def call_openai_chat(user_input: str, image_context: str = None) -> str:
-    openai.api_key = OPENAI_API_KEY
     context = search_google_sheet(user_input)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     today = str(datetime.date.today())
@@ -81,14 +78,17 @@ def call_openai_chat(user_input: str, image_context: str = None) -> str:
     if image_context:
         messages.append({"role": "user", "content": f"這是圖片內容分析：{image_context}"})
     messages.append({"role": "user", "content": user_input})
-    response = openai.ChatCompletion.create(model="gpt-4o", messages=messages)
-    return response.choices[0].message["content"]
 
-# === 處理圖片內容 ===
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages
+    )
+    return response.choices[0].message.content
+
+# === 呼叫 OpenAI 處理圖片 ===
 def call_openai_image(image_bytes: bytes) -> str:
-    openai.api_key = OPENAI_API_KEY
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-    response = openai.ChatCompletion.create(
+    response = openai_client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -101,9 +101,9 @@ def call_openai_image(image_bytes: bytes) -> str:
             }
         ]
     )
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content
 
-# === 處理 LINE Webhook ===
+# === 處理 Webhook ===
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers["X-Line-Signature"]
@@ -114,10 +114,10 @@ async def callback(request: Request):
         return PlainTextResponse("Invalid signature", status_code=400)
     return PlainTextResponse("OK", status_code=200)
 
-# === 訊息緩衝區（用於圖片+文字整合處理）===
+# === 圖片暫存（圖片+文字整合）===
 message_cache = {}
 
-# === 文字訊息處理 ===
+# === 處理文字訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     user_id = event.source.user_id
@@ -129,7 +129,7 @@ def handle_text_message(event):
         reply = call_openai_chat(user_input)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# === 圖片訊息處理 ===
+# === 處理圖片訊息 ===
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     message_content = line_bot_api.get_message_content(event.message.id)
@@ -137,3 +137,4 @@ def handle_image_message(event):
     image_context = call_openai_image(image_data)
     user_id = event.source.user_id
     message_cache[user_id] = image_context
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="好的～請再補充一下這張圖片是想問什麼唷～"))
