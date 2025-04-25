@@ -26,14 +26,10 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 
-# === 每日問候紀錄 ===
-greeted_users = {}
-
-# === 小婕的系統設定 ===
+# === 小婕系統設定 ===
 SYSTEM_PROMPT = """
 你是來自「H.R燈藝」的客服女孩「小婕」，個性活潑熱情又專業，專門回答與機車燈具、安裝方式、改裝精品有關的問題。
 請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，請勿使用簡體字與 emoji。
-
 店家資訊如下：
 店名：H.R燈藝 機車精品改裝
 地址：桃園市中壢區南園二路435號
@@ -41,7 +37,13 @@ SYSTEM_PROMPT = """
 連絡電話：03 433 3088
 """
 
-# === 查詢 Google Sheet 內容 ===
+# === 問候紀錄（每天一次）
+greeted_users = {}
+
+# === 使用者對話暫存（上下文記憶）
+user_context_memory = {}
+
+# === 查詢 Google Sheet（模糊搜尋）
 def search_google_sheet(user_input: str) -> str:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
@@ -53,39 +55,54 @@ def search_google_sheet(user_input: str) -> str:
     for worksheet in sheet.worksheets():
         records = worksheet.get_all_records()
         for row in records:
-            if any(user_input in str(value) for value in row.values()):
-                info = "｜".join(f"{k}：{v}" for k, v in row.items())
-                all_results.append(info)
+            for value in row.values():
+                if value and str(user_input).lower() in str(value).lower():
+                    info = "｜".join(f"{k}：{v}" for k, v in row.items())
+                    all_results.append(info)
+                    break  # 一行只要符合一次就可以了
 
     if all_results:
-        return "以下是我從知識庫幫您找到的資料：\n" + "\n\n".join(all_results)
+        return "以下是我從知識庫找到的資料：\n" + "\n\n".join(all_results)
     else:
         return ""
 
-# === 呼叫 OpenAI Chat（新版）===
-def call_openai_chat(user_input: str, image_context: str = None) -> str:
+# === 呼叫 OpenAI Chat
+def call_openai_chat(user_id: str, user_input: str, image_context: str = None) -> str:
     context = search_google_sheet(user_input)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    memory = user_context_memory.get(user_id, "")
+
     today = str(datetime.date.today())
     if greeted_users.get(today) is None:
         greeted_users.clear()
         greeted_users[today] = set()
-    if user_input not in greeted_users[today]:
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    if user_id not in greeted_users[today]:
         messages.append({"role": "assistant", "content": "您好～這裡是 H.R燈藝，我是小婕！很高興為您服務！"})
-        greeted_users[today].add(user_input)
+        greeted_users[today].add(user_id)
+
+    if memory:
+        messages.append({"role": "system", "content": f"這是客人前面的描述：{memory}"})
     if context:
-        messages.append({"role": "system", "content": f"以下是知識庫內容：\n{context}"})
+        messages.append({"role": "system", "content": f"這是知識庫內容：{context}"})
     if image_context:
-        messages.append({"role": "user", "content": f"這是圖片內容分析：{image_context}"})
+        messages.append({"role": "user", "content": f"這是圖片分析結果：{image_context}"})
+
     messages.append({"role": "user", "content": user_input})
 
     response = openai_client.chat.completions.create(
         model="gpt-4o",
-        messages=messages
+        messages=messages,
+        max_tokens=800
     )
-    return response.choices[0].message.content
+    
+    # 更新上下文記憶
+    user_context_memory[user_id] = user_input
 
-# === 呼叫 OpenAI 處理圖片 ===
+    return response.choices[0].message.content.strip()
+
+# === 呼叫 OpenAI 處理圖片
 def call_openai_image(image_bytes: bytes) -> str:
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     response = openai_client.chat.completions.create(
@@ -95,15 +112,16 @@ def call_openai_image(image_bytes: bytes) -> str:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "請幫我看看這張圖片的內容，並根據圖片給我建議或說明"},
+                    {"type": "text", "text": "請描述這張圖片內容"},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                 ]
             }
-        ]
+        ],
+        max_tokens=500
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
 
-# === 處理 Webhook ===
+# === Webhook
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers["X-Line-Signature"]
@@ -114,27 +132,27 @@ async def callback(request: Request):
         return PlainTextResponse("Invalid signature", status_code=400)
     return PlainTextResponse("OK", status_code=200)
 
-# === 圖片暫存（圖片+文字整合）===
+# === 圖片暫存區
 message_cache = {}
 
-# === 處理文字訊息 ===
+# === 文字訊息處理
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
+def handle_text(event):
     user_id = event.source.user_id
     user_input = event.message.text
     if user_id in message_cache:
         image_context = message_cache.pop(user_id)
-        reply = call_openai_chat(user_input, image_context)
+        reply = call_openai_chat(user_id, user_input, image_context)
     else:
-        reply = call_openai_chat(user_input)
+        reply = call_openai_chat(user_id, user_input)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# === 處理圖片訊息 ===
+# === 圖片訊息處理
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
+def handle_image(event):
     message_content = line_bot_api.get_message_content(event.message.id)
     image_data = b''.join(chunk for chunk in message_content.iter_content())
     image_context = call_openai_image(image_data)
     user_id = event.source.user_id
     message_cache[user_id] = image_context
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="好的～請再補充一下這張圖片是想問什麼唷～"))
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="小婕收到圖片囉～請告訴我想問什麼！"))
