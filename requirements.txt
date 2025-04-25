@@ -1,4 +1,5 @@
 flask
+uvicorn
 line-bot-sdk
 openai>=1.0.0
 google-auth
