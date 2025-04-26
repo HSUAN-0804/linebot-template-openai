@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import pytz
 import requests
 import gspread
@@ -36,11 +35,11 @@ faq_sheet_name = "FAQ"
 service_sheet_name = "烤漆服務"
 system_prompt = (
     "你是H.R燈藝的小婕，一位活潑熱情又專業的女生客服，請使用繁體中文回答。"
-    "遇到新客人時請用：哈囉～我是 H.R燈藝的小婕！很高興為您服務~✨。"
-    "回覆中禁止使用簡體字。"
+    "你服務於桃園中壢的「H.R燈藝」，主要提供機車外觀改裝、燈系照明升級（如大燈、方向燈、日行燈、底燈等）及專業的機車車殼烤漆服務。"
+    "本店不改傳動系統與動力系統，如遇相關詢問請委婉說明。"
+    "請自然融入店家資訊，回覆要親切有溫度且不得使用簡體字。"
 )
 
-# --- 輔助函式 ---
 def get_today_date():
     tz = pytz.timezone('Asia/Taipei')
     return datetime.now(tz).date()
@@ -65,7 +64,6 @@ def find_faq_reply(user_message):
         return None
     except Exception:
         return None
-
 def search_service_table(user_message):
     try:
         service_sheet = sheet.worksheet(service_sheet_name)
@@ -80,7 +78,7 @@ def search_service_table(user_message):
 
 def detect_vehicle_and_color(user_message):
     vehicle_keywords = ["JETS", "JETSR", "JETSL", "SL125", "SL158", "SR"]
-    color_keywords = ["紅", "橙", "黃", "綠", "藍", "紫", "白", "黑", "帝王黑", "星空黑", "銀河黑"]
+    color_keywords = ["紅", "橙", "黃", "綠", "藍", "紫", "白", "黑", "帝王黑", "星空黑", "銀河黑", "消光"]
     vehicle = next((v for v in vehicle_keywords if v in user_message), None)
     color = next((c for c in color_keywords if c in user_message), None)
     return vehicle, color
@@ -118,15 +116,14 @@ def generate_paint_reply(vehicle, color):
 
         for row in data:
             name = row['服務名稱']
-            if vehicle and color:
-                if vehicle in name and "基本色" in name:
-                    if "消光" in color and "消光" in name:
-                        base_price = row['售價（元）']
-                    elif ("亮光" in color or "光" not in color) and "亮光" in name:
-                        base_price = row['售價（元）']
-                if "特殊色" in name and color.replace("消光", "").replace("亮光", "") in name:
-                    special_price = row['售價（元）']
-                    special_found = True
+            if vehicle and "基本色" in name:
+                if "消光" in color and "消光" in name:
+                    base_price = row['售價（元）']
+                elif "亮光" in name and "消光" not in color:
+                    base_price = row['售價（元）']
+            if "特殊色" in name and color.replace("消光", "").replace("亮光", "") in name:
+                special_price = row['售價（元）']
+                special_found = True
 
         if base_price:
             if special_found:
@@ -198,5 +195,6 @@ def handle_message(event):
     except Exception as e:
         print(f"Error: {e}")
 
+# --- 啟動 ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
