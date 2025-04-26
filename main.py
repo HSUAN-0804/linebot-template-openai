@@ -1,156 +1,157 @@
 import os
-import base64
 import json
-import datetime
-import httpx
 import openai
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
+import requests
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+import pytz
 
-# === 環境變數 ===
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+app = Flask(__name__)
+
+# === 環境變數設定 ===
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# === Google Sheets 設定 ===
 GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+SERVICE_ACCOUNT_INFO = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
+SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
+gc = gspread.authorize(creds)
+SHEET_URL = "https://docs.google.com/spreadsheets/d/16_oMf8gcXNU1-RLyztSDpAm6Po0xMHm4VVVUpMAhORs"
+spreadsheet = gc.open_by_url(SHEET_URL)
 
-# === LINE 設定 ===
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# === 小婕每日招呼語記憶 ===
+greeting_memory = {}
 
-# === FastAPI App ===
-app = FastAPI()
+def has_greeted_today(user_id):
+    today = datetime.now(pytz.timezone('Asia/Taipei')).date()
+    return greeting_memory.get(user_id) == today
 
-# === 每日問候紀錄 ===
-greeted_users = {}
+def mark_greeted(user_id):
+    today = datetime.now(pytz.timezone('Asia/Taipei')).date()
+    greeting_memory[user_id] = today
 
-# === 小婕客服語氣設定 ===
-SYSTEM_PROMPT = """
-你是來自「H.R燈藝」的客服女孩「小婕」，個性活潑熱情又專業，專門回答與機車燈具、安裝方式、改裝精品有關的問題。
-請使用繁體中文回答，語氣要像真人客服一樣自然有禮貌，請勿使用簡體字與 emoji。
-店家資訊：
-- 店名：H.R燈藝 機車精品改裝
-- 地址：桃園市中壢區南園二路435號
-- 營業時間：10:30～21:00（週四公休，週日18:00提早打烊）
-- 電話：03 433 3088
-"""
-
-# === 查詢 Google Sheet 商品資料 ===
-def search_google_sheet(user_input: str) -> str:
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/16_oMf8gcXNU1-RLyztSDpAm6Po0xMHm4VVVUpMAhORs")
-
+# === 查詢 Google Sheets ===
+def search_google_sheets(query):
     results = []
-    for worksheet in sheet.worksheets():
-        records = worksheet.get_all_records()
-        for row in records:
-            if any(user_input.lower() in str(value).lower() for value in row.values()):
-                item = {k: v for k, v in row.items() if k in ["商品名稱", "售價"]}
-                if item:
-                    results.append(item)
+    for sheet in spreadsheet.worksheets():
+        try:
+            records = sheet.get_all_records()
+            for row in records:
+                if any(query in str(value) for value in row.values()):
+                    results.append(row)
+        except Exception:
+            continue
+    return results
 
-    if not results:
-        return ""
-
-    if len(results) == 1:
-        item = results[0]
-        return f"找到的商品資訊：\n商品名稱：{item['商品名稱']}\n售價：{item['售價']} 元\n\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
+# === 呼叫 OpenAI 文字聊天（可搭配圖片）===
+def ask_gpt(user_message, image_url=None):
+    client = openai.OpenAI()
+    messages = [
+        {
+            "role": "system",
+            "content": "你是來自 H.R燈藝機車精品改裝店的客服小婕，個性活潑熱情又專業，請使用繁體中文回答，且不要使用簡體字或emoji。"
+        }
+    ]
+    if image_url:
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": user_message}
+            ]
+        })
     else:
-        msg = "找到以下多個版本的商品，請您參考：\n"
-        for item in results:
-            msg += f"- {item['商品名稱']}：{item['售價']} 元\n"
-        msg += "\n有希望什麼時候安裝嗎？可以為您查詢貨況喔！也歡迎多多善用我們的預約系統自行挑選時段預約！"
-        return msg
-
-# === 呼叫 OpenAI Chat ===
-def call_openai_chat(user_input: str, image_context: str = None) -> str:
-    openai.api_key = OPENAI_API_KEY
-    context = search_google_sheet(user_input)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    today = str(datetime.date.today())
-    if greeted_users.get(today) is None:
-        greeted_users.clear()
-        greeted_users[today] = set()
-
-    if user_input not in greeted_users[today]:
-        messages.append({"role": "assistant", "content": "您好～這裡是 H.R燈藝，我是小婕！很高興為您服務！"})
-        greeted_users[today].add(user_input)
-
-    if context:
-        messages.append({"role": "system", "content": f"以下是知識庫找到的資料：\n{context}"})
-
-    if image_context:
-        messages.append({"role": "user", "content": f"這是圖片分析的內容：{image_context}"})
-
-    messages.append({"role": "user", "content": user_input})
-
-    response = openai.ChatCompletion.create(
+        messages.append({
+            "role": "user",
+            "content": [{"type": "text", "text": user_message}]
+        })
+    
+    response = client.chat.completions.create(
         model="gpt-4o",
         messages=messages
     )
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content
 
-# === 呼叫 OpenAI 圖片辨識 ===
-def call_openai_image(image_bytes: bytes) -> str:
-    openai.api_key = OPENAI_API_KEY
-    base64_image = base64.b64encode(image_bytes).decode("utf-8")
-    response = openai.ChatCompletion.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "請幫我分析這張圖片的內容，並給我建議或說明"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }
-        ]
-    )
-    return response.choices[0].message["content"]
-
-# === Webhook 接收 LINE 訊息 ===
-@app.post("/callback")
-async def callback(request: Request):
-    signature = request.headers["X-Line-Signature"]
-    body = await request.body()
+# === FastAPI Callback ===
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
     try:
-        handler.handle(body.decode("utf-8"), signature)
+        handler.handle(body, signature)
     except InvalidSignatureError:
-        return PlainTextResponse("Invalid signature", status_code=400)
-    return PlainTextResponse("OK", status_code=200)
+        abort(400)
+    return 'OK'
 
-# === 訊息緩衝區（文字＋圖片整合）===
-message_cache = {}
-
-# === 處理文字訊息 ===
+# === 文字訊息處理 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     user_id = event.source.user_id
-    user_input = event.message.text
+    user_message = event.message.text.strip()
+    sheet_results = search_google_sheets(user_message)
 
-    if user_id in message_cache:
-        image_context = message_cache.pop(user_id)
-        reply = call_openai_chat(user_input, image_context)
+    if sheet_results:
+        if len(sheet_results) == 1:
+            item = sheet_results[0]
+            name = item.get("商品名稱", "未命名")
+            price = item.get("售價", "未定價")
+            msg = f"我們有販售「{name}」，售價是 {price} 元喔！\n有希望什麼時候安裝嗎？可以幫您查詢貨況喔！\n也歡迎多多善用我們的預約系統自行挑選時段預約！"
+        else:
+            names = [item.get("商品名稱", "未命名") for item in sheet_results]
+            msg = "我們有以下幾個相關商品可以參考：\n" + "\n".join(f"- {n}" for n in names)
     else:
-        reply = call_openai_chat(user_input)
+        msg = ask_gpt(user_message)
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    if not has_greeted_today(user_id):
+        msg = f"哈囉您好～這裡是 H.R燈藝，小婕為您服務！\n{msg}"
+        mark_greeted(user_id)
 
-# === 處理圖片訊息 ===
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+    except:
+        pass
+
+# === 圖片訊息處理 ===
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-    image_data = b''.join(chunk for chunk in message_content.iter_content())
-    image_context = call_openai_image(image_data)
-
     user_id = event.source.user_id
-    message_cache[user_id] = image_context
+    image_content = line_bot_api.get_message_content(event.message.id)
+    image_path = f"/tmp/{event.message.id}.jpg"
+    with open(image_path, 'wb') as f:
+        for chunk in image_content.iter_content():
+            f.write(chunk)
+
+    image_url = upload_to_imgbb(image_path)
+    if not image_url:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片上傳失敗，請稍後再試喔！"))
+        return
+
+    reply = ask_gpt("請幫我分析這張圖片的內容並提供建議", image_url=image_url)
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    except:
+        pass
+
+# === 上傳圖片到 ImgBB ===
+def upload_to_imgbb(image_path):
+    api_key = os.getenv("IMGBB_API_KEY")
+    with open(image_path, "rb") as file:
+        response = requests.post(
+            "https://api.imgbb.com/1/upload",
+            params={"key": api_key},
+            files={"image": file}
+        )
+    if response.status_code == 200:
+        return response.json()['data']['url']
+    return None
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
