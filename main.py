@@ -13,10 +13,12 @@ import pytz
 
 app = Flask(__name__)
 
+# 環境變數設定
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# Google Sheets 授權與資料庫設定
 GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
 SERVICE_ACCOUNT_INFO = json.loads(GOOGLE_SERVICE_ACCOUNT_KEY)
 SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -25,6 +27,7 @@ gc = gspread.authorize(creds)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/16_oMf8gcXNU1-RLyztSDpAm6Po0xMHm4VVVUpMAhORs"
 spreadsheet = gc.open_by_url(SHEET_URL)
 
+# 小婕每日招呼語記憶
 greeting_memory = {}
 
 def has_greeted_today(user_id):
@@ -37,23 +40,27 @@ def mark_greeted(user_id):
 
 def search_google_sheets(query):
     results = []
+    faq_reply = None
     for sheet in spreadsheet.worksheets():
         try:
             records = sheet.get_all_records()
             for row in records:
-                for key, value in row.items():
-                    if value and isinstance(value, str) and query in value:
+                row_str = json.dumps(row, ensure_ascii=False)
+                if query in row_str:
+                    if sheet.title == "FAQ":
+                        if not faq_reply and row.get("小婕的建議回覆方向"):
+                            faq_reply = row["小婕的建議回覆方向"]
+                    else:
                         results.append(row)
-                        break
         except Exception:
             continue
-    return results
+    return results, faq_reply
 
 def ask_gpt(user_message, image_url=None):
     messages = [
         {
             "role": "system",
-            "content": "你是來自 H.R燈藝機車精品改裝店的客服小婕，活潑熱情又專業，請用繁體中文回覆。"
+            "content": "你是 H.R燈藝機車精品改裝店的客服小婕，活潑熱情又專業，請用繁體中文回覆。"
         }
     ]
     if image_url:
@@ -91,23 +98,23 @@ def callback():
 def handle_text(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-    sheet_results = search_google_sheets(user_message)
+    sheet_results, faq_reply = search_google_sheets(user_message)
 
     if sheet_results:
         if len(sheet_results) == 1:
             item = sheet_results[0]
-            name = item.get("商品名稱")
-            price = item.get("售價")
-            if name and price and str(price).strip().isdigit():
+            name = item.get("商品名稱", "")
+            price = item.get("售價", "")
+            if name and price and price != "未定價":
                 msg = f"我們有販售「{name}」，售價是 {price} 元喔！\n有希望什麼時候安裝嗎？可以幫您查詢貨況喔！\n也歡迎多多善用我們的預約系統自行挑選時段預約！"
             else:
                 msg = ask_gpt(user_message)
         else:
-            names = [item.get("商品名稱") for item in sheet_results if item.get("商品名稱")]
-            if names:
-                msg = "我們有以下幾個相關商品可以參考：\n" + "\n".join(f"- {n}" for n in names)
-            else:
-                msg = ask_gpt(user_message)
+            valid_items = [item for item in sheet_results if item.get("商品名稱")]
+            names = [item["商品名稱"] for item in valid_items]
+            msg = "我們有以下幾個相關商品可以參考：\n" + "\n".join(f"- {n}" for n in names)
+    elif faq_reply:
+        msg = faq_reply
     else:
         msg = ask_gpt(user_message)
 
