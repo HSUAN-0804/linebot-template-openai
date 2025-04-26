@@ -35,9 +35,9 @@ faq_sheet_name = "FAQ"
 service_sheet_name = "烤漆服務"
 system_prompt = (
     "你是H.R燈藝的小婕，一位活潑熱情又專業的女生客服，請使用繁體中文回答。"
-    "你服務於桃園中壢的「H.R燈藝」，主要提供機車外觀改裝、燈系照明升級（如大燈、方向燈、日行燈、底燈等）及專業的機車車殼烤漆服務。"
+    "你服務於桃園中壢的「H.R燈藝」，專門提供機車外觀改裝、燈系照明升級（如大燈、方向燈、日行燈、底燈等）以及專業的機車車殼烤漆服務。"
     "本店不改傳動系統與動力系統，如遇相關詢問請委婉說明。"
-    "請自然融入店家資訊，回覆要親切有溫度且不得使用簡體字。"
+    "請自然融入店家資訊，回覆要親切有溫度，不生硬，不罐頭，且禁止使用簡體字。"
 )
 
 def get_today_date():
@@ -77,11 +77,22 @@ def search_service_table(user_message):
         return []
 
 def detect_vehicle_and_color(user_message):
-    vehicle_keywords = ["JETS", "JETSR", "JETSL", "SL125", "SL158", "SR"]
-    color_keywords = ["紅", "橙", "黃", "綠", "藍", "紫", "白", "黑", "帝王黑", "星空黑", "銀河黑", "消光"]
-    vehicle = next((v for v in vehicle_keywords if v in user_message), None)
+    vehicle_keywords = ["JETS", "JETSR", "JETSL", "SL125", "SL158", "SR", "FORCE", "FORCE2.0", "DRG", "DRG2.0"]
+    color_keywords = ["紅", "橙", "黃", "綠", "藍", "紫", "白", "黑", "帝王黑", "星空黑", "銀河黑", "消光", "亮光"]
+    vehicle = next((v for v in vehicle_keywords if v in user_message.upper()), None)
     color = next((c for c in color_keywords if c in user_message), None)
     return vehicle, color
+
+def normalize_vehicle(vehicle):
+    mapping = {
+        "JETSR": "JETS",
+        "JETSL": "JETS",
+        "SL125": "JETSL125",
+        "SL158": "JETSL158",
+        "DRG2.0": "DRG二代",
+        "FORCE2.0": "FORCE二代"
+    }
+    return mapping.get(vehicle, vehicle)
 
 def build_greeting(user_id):
     if not has_greeted_today(user_id):
@@ -107,30 +118,32 @@ def process_image(image_content):
 
 def generate_paint_reply(vehicle, color):
     try:
+        if not vehicle:
+            return None
+
+        vehicle = normalize_vehicle(vehicle)
         service_sheet = sheet.worksheet(service_sheet_name)
         data = service_sheet.get_all_records()
 
         base_price = None
         special_price = None
-        special_found = False
 
         for row in data:
             name = row['服務名稱']
-            if vehicle and "基本色" in name:
-                if "消光" in color and "消光" in name:
+            if vehicle in name and "基本色" in name:
+                if color and "消光" in color and "消光" in name:
                     base_price = row['售價（元）']
-                elif "亮光" in name and "消光" not in color:
+                elif (not color or "亮光" in color) and "亮光" in name:
                     base_price = row['售價（元）']
-            if "特殊色" in name and color.replace("消光", "").replace("亮光", "") in name:
+            if "特殊色" in name and color and color.replace("消光", "").replace("亮光", "") in name:
                 special_price = row['售價（元）']
-                special_found = True
 
         if base_price:
-            if special_found:
+            if special_price:
                 total = int(base_price) + int(special_price)
-                return f"幫您查到了～基本色烤漆價格是{base_price}元，選擇特殊色 {color} 需加價，共約{total}元喔！✨（實際價格以現場確認為主，雙色以上建議現場洽詢！）"
+                return f"幫您查到了～{vehicle}基本色烤漆價格是{base_price}元，加上選擇特殊色 {color}，總共約{total}元喔！✨（實際價格以現場確認為主，雙色以上建議現場洽詢！）"
             else:
-                return f"幫您查到了～基本色烤漆價格是{base_price}元喔！✨（若選特殊色會另外加價，歡迎提供顏色讓小婕幫您試算！）"
+                return f"幫您查到了～{vehicle}基本色烤漆價格是{base_price}元喔～✨（若選特殊色會另外加價，歡迎提供顏色讓小婕幫您試算！）"
         else:
             return None
     except Exception:
@@ -166,10 +179,10 @@ def handle_message(event):
             reply_messages = []
             if greeting:
                 reply_messages.append(TextSendMessage(text=greeting))
-            if faq_reply:
-                reply_messages.append(TextSendMessage(text=faq_reply))
-            elif paint_reply:
+            if paint_reply:
                 reply_messages.append(TextSendMessage(text=paint_reply))
+            elif faq_reply:
+                reply_messages.append(TextSendMessage(text=faq_reply))
             elif service_matches:
                 found_services = "\n".join([f"{m['服務名稱']} - {m['售價（元）']}元" for m in service_matches])
                 reply_messages.append(TextSendMessage(text=f"這邊幫您找到相關服務喔～\n{found_services}"))
