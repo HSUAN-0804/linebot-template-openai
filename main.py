@@ -38,29 +38,42 @@ def mark_greeted(user_id):
     today = datetime.now(pytz.timezone('Asia/Taipei')).date()
     greeting_memory[user_id] = today
 
+# 查詢 Google Sheets (用關鍵字模糊搜尋)
 def search_google_sheets(query):
     results = []
-    faq_reply = None
     for sheet in spreadsheet.worksheets():
         try:
             records = sheet.get_all_records()
             for row in records:
-                row_str = json.dumps(row, ensure_ascii=False)
-                if query in row_str:
-                    if sheet.title == "FAQ":
-                        if not faq_reply and row.get("小婕的建議回覆方向"):
-                            faq_reply = row["小婕的建議回覆方向"]
-                    else:
+                for value in row.values():
+                    if value and isinstance(value, str) and query in value:
                         results.append(row)
+                        break
         except Exception:
             continue
-    return results, faq_reply
+    return results
 
+# 呼叫 GPT-4o，讓小婕理解問題內容，抓出關鍵字
+def extract_keywords(question):
+    client = openai.OpenAI()
+    prompt = f"""以下是客戶的問題：「{question}」
+請幫我判斷客戶是在詢問哪一個商品或產品？只需要回傳商品名稱，不要加上其他多餘說明文字。如果無法判斷就回傳空白。"""
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "你是擅長判斷商品關鍵字的小助手。"},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    keyword = response.choices[0].message.content.strip()
+    return keyword
+
+# 呼叫 GPT-4o（圖片或純文字）
 def ask_gpt(user_message, image_url=None):
     messages = [
         {
             "role": "system",
-            "content": "你是 H.R燈藝機車精品改裝店的客服小婕，活潑熱情又專業，請用繁體中文回覆。"
+            "content": "你是來自 H.R燈藝機車精品改裝店的客服小婕，活潑熱情又專業，請用繁體中文回答，不要出現簡體字或 emoji。"
         }
     ]
     if image_url:
@@ -98,23 +111,19 @@ def callback():
 def handle_text(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-    sheet_results, faq_reply = search_google_sheets(user_message)
+
+    keyword = extract_keywords(user_message)
+    sheet_results = search_google_sheets(keyword if keyword else user_message)
 
     if sheet_results:
         if len(sheet_results) == 1:
             item = sheet_results[0]
-            name = item.get("商品名稱", "")
-            price = item.get("售價", "")
-            if name and price and price != "未定價":
-                msg = f"我們有販售「{name}」，售價是 {price} 元喔！\n有希望什麼時候安裝嗎？可以幫您查詢貨況喔！\n也歡迎多多善用我們的預約系統自行挑選時段預約！"
-            else:
-                msg = ask_gpt(user_message)
+            name = item.get("商品名稱", "未命名")
+            price = item.get("售價", "未定價")
+            msg = f"我們有販售「{name}」，售價是 {price} 元喔！\n有希望什麼時候安裝嗎？可以幫您查詢貨況喔！\n也歡迎多多善用我們的預約系統自行挑選時段預約！"
         else:
-            valid_items = [item for item in sheet_results if item.get("商品名稱")]
-            names = [item["商品名稱"] for item in valid_items]
+            names = [item.get("商品名稱", "未命名") for item in sheet_results]
             msg = "我們有以下幾個相關商品可以參考：\n" + "\n".join(f"- {n}" for n in names)
-    elif faq_reply:
-        msg = faq_reply
     else:
         msg = ask_gpt(user_message)
 
@@ -138,15 +147,17 @@ def handle_image(event):
 
     image_url = upload_to_imgbb(image_path)
     if not image_url:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片上傳失敗，請稍後再試。"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片上傳失敗，請稍後再試喔！"))
         return
 
     reply = ask_gpt("請幫我分析這張圖片的內容並提供建議", image_url=image_url)
+
     try:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
     except:
         pass
 
+# 圖片上傳到 Imgbb
 def upload_to_imgbb(image_path):
     api_key = os.getenv("IMGBB_API_KEY")
     with open(image_path, "rb") as file:
