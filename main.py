@@ -14,7 +14,6 @@ import openai
 from io import BytesIO
 from PIL import Image
 
-# --- 初始化 ---
 app = Flask(__name__)
 
 line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
@@ -30,7 +29,6 @@ gs_client = gspread.authorize(google_credentials)
 sheet_url = os.environ.get("SHEET_URL")
 sheet = gs_client.open_by_url(sheet_url)
 
-# --- 全域變數 ---
 user_greeting_memory = {}
 faq_sheet_name = "FAQ"
 service_sheet_name = "烤漆服務"
@@ -40,7 +38,6 @@ system_prompt = (
     "回覆中禁止使用簡體字。"
 )
 
-# --- 輔助函式 ---
 def get_today_date():
     tz = pytz.timezone('Asia/Taipei')
     return datetime.now(tz).date()
@@ -65,7 +62,6 @@ def find_faq_reply(user_message):
         return None
     except Exception:
         return None
-
 def search_service_table(user_message):
     try:
         service_sheet = sheet.worksheet(service_sheet_name)
@@ -139,7 +135,6 @@ def generate_paint_reply(vehicle, color):
     except Exception:
         return None
 
-# --- 路由設定 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -174,7 +169,8 @@ def handle_message(event):
             elif paint_reply:
                 reply_messages.append(TextSendMessage(text=paint_reply))
             elif service_matches:
-                reply_messages.append(TextSendMessage(text=f"這邊幫您找到相關服務喔～\n" + "\n".join([f\"{m['服務名稱']} - {m['售價（元）']}元\" for m in service_matches])))
+                found_services = "\\n".join([f\"{m['服務名稱']} - {m['售價（元）']}元\" for m in service_matches])
+                reply_messages.append(TextSendMessage(text=f\"這邊幫您找到相關服務喔～\\n{found_services}\")) 
             else:
                 prompt = [
                     {"role": "system", "content": system_prompt},
@@ -192,11 +188,10 @@ def handle_message(event):
         elif isinstance(event.message, ImageMessage):
             image_content = line_bot_api.get_message_content(event.message.id).content
             description = process_image(image_content)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"收到您的圖片囉～看起來像是：{description}"))
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=f\"收到您的圖片囉～看起來像是：{description}\"))
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f\"Error: {e}\")
 
-# --- 啟動 ---
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+if __name__ == \"__main__\":
+    app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5000)))
